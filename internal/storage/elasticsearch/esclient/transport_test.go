@@ -22,6 +22,7 @@ import (
 	"go.opentelemetry.io/collector/config/configtls"
 	"go.uber.org/zap"
 
+	"github.com/jaegertracing/jaeger/internal/headerforwarding"
 	"github.com/jaegertracing/jaeger/internal/metrics"
 	es "github.com/jaegertracing/jaeger/internal/storage/elasticsearch"
 	"github.com/jaegertracing/jaeger/internal/storage/elasticsearch/config"
@@ -528,4 +529,32 @@ func TestNewRawClientPoolBuildError(t *testing.T) {
 	}
 	_, err := newRawClient(t.Context(), http.DefaultTransport, rawClientOptions{servers: []string{"http://localhost:9200"}})
 	require.ErrorContains(t, err, "failed to build transport pool")
+}
+
+func TestNewClientForwardsCapturedHeaders(t *testing.T) {
+	var got atomic.Value
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(r.Header.Get("X-Forwarded-User"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(t.Context(), &config.Configuration{
+		Servers: []string{server.URL},
+		Version: uint(es.ElasticV7),
+		TLS:     configtls.ClientConfig{InsecureSkipVerify: true},
+	}, zap.NewNop(), nil)
+	require.NoError(t, err)
+	defer client.Close()
+
+	ctx := headerforwarding.ContextWithCaptured(t.Context(), []headerforwarding.CapturedHeader{{
+		Header: &headerforwarding.ForwardedHeader{HTTPName: "X-Forwarded-User", Role: headerforwarding.RoleUsername},
+		Value:  "alice",
+	}})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/_cluster/health", http.NoBody)
+	require.NoError(t, err)
+
+	_, err = client.Perform(req)
+	require.NoError(t, err)
+	assert.Equal(t, "alice", got.Load())
 }

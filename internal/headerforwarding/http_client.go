@@ -28,8 +28,14 @@ type httpClientRoundTripper struct {
 	base http.RoundTripper
 }
 
+func (rt *httpClientRoundTripper) CloseIdleConnections() {
+	if closer, ok := rt.base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
 func (rt *httpClientRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if len(CapturedFromContext(req.Context())) == 0 {
+	if req.URL.Scheme != "https" || len(CapturedFromContext(req.Context())) == 0 {
 		return rt.base.RoundTrip(req)
 	}
 	// RoundTripper contract: do not mutate the inbound *http.Request.

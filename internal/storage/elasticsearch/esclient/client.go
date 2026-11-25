@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/collector/extension/extensionauth"
 	"go.uber.org/zap"
 
+	"github.com/jaegertracing/jaeger/internal/headerforwarding"
 	es "github.com/jaegertracing/jaeger/internal/storage/elasticsearch"
 	"github.com/jaegertracing/jaeger/internal/storage/elasticsearch/config"
 )
@@ -48,6 +49,7 @@ func NewClient(ctx context.Context, c *config.Configuration, logger *zap.Logger,
 	if err != nil {
 		return nil, err
 	}
+	base = headerforwarding.NewHTTPClientRoundTripper(base)
 	transport, err := newRawClient(ctx, base, rawClientOptions{
 		servers:             c.Servers,
 		compressRequestBody: c.HTTPCompression,

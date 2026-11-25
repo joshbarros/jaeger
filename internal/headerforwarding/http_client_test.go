@@ -6,6 +6,7 @@ package headerforwarding_test
 import (
 	"context"
 	"net/http"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -37,7 +38,7 @@ func TestHTTPClientRoundTripper_NoCapturedHeaders_PassThrough(t *testing.T) {
 	})
 	rt := headerforwarding.NewHTTPClientRoundTripper(base)
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.invalid/", http.NoBody)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://example.invalid/", http.NoBody)
 	require.NoError(t, err)
 	req.Header.Set("Existing", "value")
 
@@ -64,7 +65,7 @@ func TestHTTPClientRoundTripper_AddsCapturedHeaders(t *testing.T) {
 		{Header: hMail, Value: "alice@example.com"},
 	})
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.invalid/", http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.invalid/", http.NoBody)
 	require.NoError(t, err)
 
 	_, err = rt.RoundTrip(req)
@@ -96,7 +97,7 @@ func TestHTTPClientRoundTripper_SkipsEmptyAndInvalidEntries(t *testing.T) {
 		{Header: nil, Value: "x"},       // nil header -> skipped
 	})
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.invalid/", http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.invalid/", http.NoBody)
 	require.NoError(t, err)
 
 	_, err = rt.RoundTrip(req)
@@ -132,7 +133,7 @@ func TestHTTPClientRoundTripper_RewritesOutboundHeaderName(t *testing.T) {
 		{Header: fallback, Value: "alice@example.com"},
 	})
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.invalid/", http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.invalid/", http.NoBody)
 	require.NoError(t, err)
 
 	_, err = rt.RoundTrip(req)
@@ -151,7 +152,7 @@ func TestHTTPClientRoundTripper_PropagatesBaseError(t *testing.T) {
 	})
 	rt := headerforwarding.NewHTTPClientRoundTripper(base)
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.invalid/", http.NoBody)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://example.invalid/", http.NoBody)
 	require.NoError(t, err)
 
 	_, err = rt.RoundTrip(req)
@@ -176,4 +177,38 @@ func TestSetForwardedHTTPHeaders(t *testing.T) {
 	untouched := http.Header{}
 	headerforwarding.SetForwardedHTTPHeaders(context.Background(), untouched)
 	assert.Empty(t, untouched)
+}
+
+type closeTrackingRoundTripper struct {
+	closed atomic.Bool
+}
+
+func (rt *closeTrackingRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK}, nil
+}
+
+func (rt *closeTrackingRoundTripper) CloseIdleConnections() { rt.closed.Store(true) }
+
+func TestHTTPClientRoundTripper_ForwardsCloseIdleConnections(t *testing.T) {
+	base := &closeTrackingRoundTripper{}
+	rt := headerforwarding.NewHTTPClientRoundTripper(base)
+	rt.(interface{ CloseIdleConnections() }).CloseIdleConnections()
+	assert.True(t, base.closed.Load())
+}
+
+func TestHTTPClientRoundTripper_DoesNotForwardOverPlainHTTP(t *testing.T) {
+	var seen *http.Request
+	rt := headerforwarding.NewHTTPClientRoundTripper(roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		seen = r
+		return &http.Response{StatusCode: http.StatusOK}, nil
+	}))
+	ctx := headerforwarding.ContextWithCaptured(context.Background(), []headerforwarding.CapturedHeader{{
+		Header: &headerforwarding.ForwardedHeader{HTTPName: "X-Forwarded-User"},
+		Value:  "alice",
+	}})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.invalid/", http.NoBody)
+	require.NoError(t, err)
+	_, err = rt.RoundTrip(req)
+	require.NoError(t, err)
+	assert.Empty(t, seen.Header.Get("X-Forwarded-User"))
 }
